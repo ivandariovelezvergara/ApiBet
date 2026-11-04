@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="ApiBet/ApiBet.csproj" />
+  <Project Path="Aplication/Aplication.csproj" />
+  <Project Path="Domain/Domain.csproj" />
+  <Project Path="Infraestructure/Infraestructure.csproj" />
+</Solution>

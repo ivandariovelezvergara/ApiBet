@@ -23,12 +23,12 @@ namespace Aplication.Configuration
         /// <summary>
         /// Offset máximo inclusive; el ciclo se detiene al alcanzarlo.
         /// </summary>
-        public int MaxOffset { get; set; } = 200;
+        public int MaxOffset { get; set; } = 20000;
 
         /// <summary>
         /// Incremento del offset en cada iteración.
         /// </summary>
-        public int OffsetIncrement { get; set; } = 1;
+        public int OffsetIncrement { get; set; } = 200;
 
         /// <summary>
         /// Segundos de espera entre iteraciones.

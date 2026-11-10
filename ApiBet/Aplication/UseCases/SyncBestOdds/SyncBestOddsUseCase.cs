@@ -65,7 +65,9 @@ namespace Aplication.UseCases.SyncBestOdds
 
             await _bestOddsRepository.ClearAllAsync(cancellationToken);
 
-            for (var offset = options.Offset; offset <= options.MaxOffset; offset += Math.Max(options.OffsetIncrement, 1))
+            var step = Math.Max(options.OffsetIncrement, options.Limit);
+
+            for (var offset = options.Offset; offset <= options.MaxOffset;)
             {
                 lastOffset = offset;
                 _logger.LogInformation("Requesting best odds page. Offset: {Offset}.", offset);
@@ -89,10 +91,12 @@ namespace Aplication.UseCases.SyncBestOdds
                 sourceUpdatedAt = page.SourceUpdatedAt ?? sourceUpdatedAt;
 
                 _logger.LogInformation(
-                    "Stored {SavedCount} best-odds rows and {SavedBookCount} all_books rows for offset {Offset}.",
+                    "Stored {SavedCount} best-odds rows and {SavedBookCount} all_books rows for offset {Offset}. HasMore: {HasMore}. NextOffset: {NextOffset}.",
                     savedInPage.OddCount,
                     savedInPage.BookCount,
-                    offset);
+                    offset,
+                    page.HasMore,
+                    page.NextOffset);
 
                 if (!page.HasMore || page.Items.Count == 0)
                 {
@@ -100,11 +104,17 @@ namespace Aplication.UseCases.SyncBestOdds
                     break;
                 }
 
-                if (offset + Math.Max(options.OffsetIncrement, 1) <= options.MaxOffset && delay > TimeSpan.Zero)
+                var nextOffset = page.NextOffset is int suggested && suggested > offset
+                    ? suggested
+                    : offset + step;
+
+                if (nextOffset <= options.MaxOffset && delay > TimeSpan.Zero)
                 {
                     _logger.LogInformation("Waiting {DelaySeconds} seconds before the next offset.", delay.TotalSeconds);
                     await Task.Delay(delay, cancellationToken);
                 }
+
+                offset = nextOffset;
             }
 
             stopwatch.Stop();

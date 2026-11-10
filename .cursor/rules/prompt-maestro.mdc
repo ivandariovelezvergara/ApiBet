@@ -1,0 +1,188 @@
+---
+description: Especificación viva de ApiBet y FrontBet. Léela antes de cambiar el producto e implementa solo las filas en estado hacer.
+alwaysApply: true
+---
+
+# Prompt maestro — ApiBet + FrontBet
+
+Versión: 1.7
+Fecha: 2026-11-10
+Idioma de trabajo: español. Identificadores de código, rutas y tablas se mantienen como están.
+
+Este archivo es la única especificación del producto. Lo que está en **Estado actual** describe el repositorio. Lo que está en **Estado objetivo** es el contrato de cómo debe quedar. Lo que está en **Cambios pedidos** es lo único que se implementa en esa sesión.
+
+## Cómo modificarlo con el tiempo
+
+1. No reescribas el archivo completo. Edita solo la sección que cambió.
+2. Para pedir una evolución, agrega una fila en **Cambios pedidos** con estado `hacer`.
+3. Cuando el cambio ya esté en el código, mueve la fila a **Bitácora**, actualiza **Estado actual** y sube la versión (1.2, 1.3…).
+4. Si una decisión deja de aplicar, márcala `no hacer` o bórrala. No dejes dos instrucciones que se contradigan.
+5. No pegues secretos aquí: ni `ConnectionStrings`, ni `SharpApi:ApiKey`, ni contraseñas. Esos valores viven en configuración local o en variables de entorno.
+6. Para regenerar o continuar el proyecto, el mensaje a la IA puede ser solo: «Implementa las filas en estado `hacer`».
+
+## Rol
+
+Actúa como desarrollador de este repositorio. Conserva la arquitectura, los nombres de proyectos y el flujo de datos que ya existen. Implementa únicamente las filas `hacer`. Si una fila es ambigua, detente y pregunta antes de escribir código. No inventes módulos, endpoints ni pantallas que no estén en el estado objetivo o en un cambio pedido. Si no hay filas `hacer`, no rehagas el proyecto: responde con el estado y pregunta qué fila agregar.
+
+## Producto
+
+Aplicación local para ver oportunidades de apuestas deportivas en pesos colombianos:
+
+- **Arbitraje:** boletas de 2 vías con montos, ganancia esperada e instrucción.
+- **Value bets:** picks de valor esperado (EV) con fracción de Kelly, stake acotado y ventana de tiempo antes del inicio.
+
+La fuente externa es SharpAPI (`https://api.sharpapi.io/api/v1/`, header `X-API-Key`). La base es SQL Server, base `Deportes`. La API no calcula el modelo en C#: lo ejecutan procedimientos almacenados. El navegador dispara la sincronización; no hay worker ni `BackgroundService`.
+
+## Límites que no se cruzan
+
+- No incluyas ayuda para evadir casas de apuestas, falsificar identidad, automatizar apuestas en sitios de terceros ni extraer credenciales.
+- La app muestra oportunidades y montos sugeridos. No coloca apuestas.
+- No subas secretos al repositorio ni a este prompt.
+- No renombres los proyectos `Aplication` ni `Infraestructure` salvo que una fila `hacer` lo pida. El typo es el nombre real de los ensamblados.
+- No cambies el contrato JSON de un endpoint ni las columnas que pinta el front si el cambio no está pedido.
+- Los filtros de sincronización y el modelo de valor se leen de configuración. No los hardcodees en controladores ni en el front.
+
+## Estado actual
+
+### Solución
+
+Raíz del workspace: `c:\ApiBet`.
+
+| Proyecto | Rol |
+| --- | --- |
+| `ApiBet/ApiBet` | Host ASP.NET Core. Controladores, CORS, OpenAPI, `appsettings`, scripts SQL. |
+| `ApiBet/Aplication` | Casos de uso, DTO y opciones. Un caso de uso por operación. |
+| `ApiBet/Domain` | Entidades e interfaces. Sin EF ni HTTP. |
+| `ApiBet/Infraestructure` | EF Core, repositorios, clientes SharpAPI, carga SQL. |
+| `FrontBet` | React 19 + Vite. Una sola página. JavaScript, sin TypeScript. |
+
+API en desarrollo: `http://localhost:5035`. Front: `http://localhost:5173`. Vite hace proxy de `/api` hacia `VITE_API_PROXY_TARGET` (por defecto `http://localhost:5035`). CORS de la API solo permite `http://localhost:5173` y `http://127.0.0.1:5173`.
+
+### Capas
+
+El controlador llama un caso de uso. El caso de uso depende de interfaces de `Domain` y de opciones. `Infraestructure` implementa repositorios y clientes HTTP. El registro está en `Aplication/DependencyInjection.cs` y `Infraestructure/DependencyInjection.cs`.
+
+Errores de SharpAPI: `ExternalServiceException` → HTTP 502 con `Problem`. Validación de negocio (banca menor a 200 COP en arbitraje): HTTP 400 con `{ message }`.
+
+`WeatherForecastController` y `WeatherForecast.cs` son residuo de la plantilla. No forman parte del producto.
+
+### Configuración de la API
+
+Secciones en `appsettings.json`. Varias se duplican como variables de entorno en `Properties/launchSettings.json` (`Seccion__Clave`).
+
+| Sección | La usa | Efecto |
+| --- | --- | --- |
+| `SharpApi` | `SharpApiHttpGateway` | `BaseUrl` y `ApiKey`. Timeout HTTP 90 s. Arranque falla si falta la clave o la URL no es absoluta. |
+| `ConnectionStrings:SqlServer` | `AppDbContext` | Base `Deportes`. |
+| `OddsSync` | `POST /api/odds/best/sync` | Paginación de mejores cuotas. Límite 1–200, salto `OffsetIncrement: 200` (o `NextOffset` sugerido por SharpAPI, mínimo `Limit`), `MaxOffset: 20000`. Deportes: basketball, tennis, baseball, american_football, mma, hockey, soccer. `IsMainLine: true`. |
+| `OddsFeed` | `POST /api/odds/sync` | Snapshot de `MarketOdds`. Mismos deportes, incluido soccer. El front no llama este endpoint. |
+| `OddsDelta` | `POST /api/odds/delta/sync` | Incremental sobre `MarketOddsDelta`. Límite 1–500. Mismos deportes, incluido soccer. |
+| `ArbitrageFeed` | `POST /api/arbitrage/sync` y lectura de boletas | Casas `bwin,betsson,stake`. `RetentionMinutes: 3`. `MinProfit: 0`. `IsLive: false`. |
+| `ValueModel` | `GET /api/odds/best` y `GET /api/arbitrage` | Banca 1 000 000 COP, Third-Kelly 0.30, stake máximo 1.75 %, exposición 18 %, EV 2.2 %–16 %, cuota 1.85–3.50, ventana 45–240 min, redondeo 1 000 COP, mínimo 5 000 COP, solo línea principal, máximo 10 picks. |
+
+### Endpoints
+
+| Método y ruta | Caso de uso | Resultado |
+| --- | --- | --- |
+| `POST /api/sports/sync` | `SyncSports` | Catálogo de deportes desde SharpAPI hacia SQL. |
+| `GET /api/sports` | `GetSports` | Catálogo guardado. |
+| `POST /api/leagues/sync` | `SyncLeagues` | Ligas. |
+| `GET /api/leagues` | `GetLeagues` | Ligas guardadas. |
+| `POST /api/sportsbooks/sync` | `SyncSportsbooks` | Casas. |
+| `GET /api/sportsbooks` | `GetSportsbooks` | Casas guardadas. |
+| `POST /api/markets/sync` | `SyncMarkets` | Mercados. |
+| `GET /api/markets` | `GetMarkets` | Mercados guardados. |
+| `POST /api/arbitrage/sync` | `SyncArbitrage` | `GET /opportunities/arbitrage` de SharpAPI, filtros `ArbitrageFeed`. |
+| `GET /api/arbitrage` | `GetArbitrage` | Boletas de 2 vías vía `dbo.spr_ArbitrageOpportunities`. Banca de `ValueModel`. Rechaza banca menor a 200 COP. |
+| `POST /api/odds/sync` | `SyncOdds` | Vacía y recarga `MarketOdds` con `OddsFeed`. No lo usa el front. |
+| `POST /api/odds/delta/sync` | `SyncOddsDelta` | Vacía `MarketOddsDelta` y aplica `dbo.spr_MarketOddsDelta_DeltaLoad`. No toca `MarketOdds`. |
+| `POST /api/odds/best/sync` | `SyncBestOdds` | Mejores cuotas con `OddsSync` hacia SQL. |
+| `GET /api/odds/best` | `GetBestOdds` | Value bets vía `dbo.spr_BestOdds_ValueBets` y `ValueModel`. El SP unifica variantes de nombres de equipos en los 2 lados canónicos del partido (`OVER`/`UNDER`, `LINE_NEG`/`LINE_POS`, `AWAY`/`HOME`), bloquea mercados con más de 2 lados, aplica De-Vig dual (consenso general + De-Vig de `BestOddBooks` sobre Stake cuando se apuesta en Bwin/Betsson) y permite Totales principales de partido completo en todos los deportes (bloqueando 1X2/Moneyline en Soccer, Team Totals, Odd/Even, player props, córners, tarjetas y mitades/cuartos/períodos). La API no envía `@SoloConHoraExacta` (queda en 0). Los umbrales de banca, EV, cuotas y minutos siguen saliendo de `ValueModel`. La cuota mínima que envía la API es 1.85. |
+
+Los GET de catálogo devuelven `{ data: [...] }`. Arbitraje devuelve boletas en `data`. Value bets devuelven `summaries` y `picks`.
+
+### SQL Server
+
+Script de tablas y procedimientos: `ApiBet/ApiBet/SqlServer-CreateTables.md`. Procedimiento de value bets: `ApiBet/ApiBet/SqlServer-spr_BestOdds_ValueBets.sql`. Ajuste de hora local: `ApiBet/ApiBet/SqlServer-FixCreatedAtLocal.sql`.
+
+Tablas de catálogo: `Sports`, `SportLeagues`, `Leagues`, `Sportsbooks`, `SportsbookRegions`, `Markets`, `MarketSports`.
+Cuotas: `BestOdds`, `BestOddBooks`, `MarketOdds`, `MarketOddsDelta`.
+Arbitraje: oportunidades y patas, más `CatalogSyncState`.
+Procedimientos que la API invoca: `spr_BestOdds_BulkLoad`, `spr_BestOdds_ValueBets`, `spr_MarketOdds_BulkLoad`, `spr_MarketOddsDelta_DeltaLoad`, `spr_ArbitrageOpportunities_BulkLoad`, `spr_ArbitrageOpportunities`. También existen `spr_BestOdds_CsvData` y `spr_BestOdds_ExportCsv`.
+
+`spr_BestOdds_ValueBets` (archivo `SqlServer-spr_BestOdds_ValueBets.sql`, aplicado en `Deportes`) devuelve los mismos dos resultados de siempre: picks y resumen. El resumen suma `SurebetsDetectadas` cuando el mercado tiene 2 lados y agrega `ConHoraExacta`, que la API no mapea. El JSON de `GET /api/odds/best` sigue siendo `{ picks, summaries }` con las propiedades que ya leía `BestOddsRepository`. `Soccer` usa factor de Kelly 0.95.
+
+La lógica de negocio de montos, EV y filtros de lectura vive en SQL. C# solo pasa los parámetros de configuración.
+
+### FrontBet
+
+Archivos: `src/main.jsx`, `App.jsx`, `App.css`, `api.js`, `config.js`, `useBackgroundJobs.js`, `ResultTables.jsx`, `DataTable.jsx`, `format.js`.
+
+`config.js` lee intervalos y rutas desde `import.meta.env`, con estos defaults:
+
+- Catálogos cada 24 h (`VITE_CATALOGS_INTERVAL_HOURS`). La última sync se guarda en `localStorage` (`frontbet.catalogs.lastSyncAt`).
+- Arbitraje cada 3 min en reposo (`VITE_ARBITRAGE_INTERVAL_MINUTES`). Con **Operación activa**, cada 60 s (`VITE_ARBITRAGE_ACTIVE_INTERVAL_SECONDS`). El botón **Sync manual inmediato** dispara `POST /api/arbitrage/sync` y el GET en ese momento, y reinicia la espera. El modo se guarda en `localStorage` (`frontbet.arbitrage.activeOperation`).
+- Odds cada 10 min (`VITE_ODDS_INTERVAL_MINUTES`).
+
+Al abrir la página el orden es: catálogos (sports → sportsbooks → markets → leagues, en serie) y después arbitraje y odds en paralelo. Cada ciclo deduplica peticiones en vuelo.
+
+Ciclo de arbitraje: `POST /api/arbitrage/sync` y luego `GET /api/arbitrage`. Si el POST falla, igual intenta el GET.
+
+Ciclo de odds: `POST /api/odds/delta/sync`, luego `POST /api/odds/best/sync`, luego `GET /api/odds/best`. Un POST fallido no cancela el otro. El front no llama `POST /api/odds/sync`.
+
+La pantalla muestra el botón de sync manual, el interruptor de operación activa, el estado de las tres syncs y dos tablas: **Arbitraje** y **Value bets** (`picks`). Los catálogos se cargan en estado y no se renderizan. `summaries` llega de la API y no se pinta.
+
+Columnas de arbitraje: deporte, liga, partido, inicio, en vivo, creado, mercado, casa/selección/cuota/monto de cada lado, banca, ganancia, total neto, instrucción.
+Columnas de value bets: señal, deporte, liga, partido, mercado, apostar a, casa, cuota actual, cuota mínima rentable, probabilidad de consenso, probabilidad implícita, instrucción.
+
+Formato: fechas locales, COP, porcentajes. Textos de UI en español.
+
+### Qué no está
+
+No hay autenticación, tests automatizados, worker de sincronización, ni despliegue descrito. El README de `FrontBet` sigue siendo el de la plantilla Vite.
+
+## Estado objetivo
+
+El producto queda como un tablero local de oportunidades, con esta forma:
+
+1. **Misma solución y mismas capas.** Host delgado, casos de uso en `Aplication`, contratos en `Domain`, SQL y SharpAPI en `Infraestructure`.
+2. **SharpAPI solo entra por los clientes de infraestructura.** Los controladores no arman URLs ni leen la API key.
+3. **SQL sigue siendo el motor de arbitraje y de value bets.** Cambiar umbrales de banca, Kelly, EV, cuotas o ventana se hace en `ValueModel` y, si el cálculo cambia, en el procedimiento correspondiente. No se duplica esa fórmula en React.
+4. **El front sigue siendo una página.** Dispara sync, muestra errores por bloque y pinta arbitraje y value bets. Los intervalos viven en `config.js` / variables `VITE_*`.
+5. **La configuración manda.** Deportes, casas, límites de página, banca y modelo se cambian en `appsettings` (y el espejo necesario en `launchSettings` cuando esa clave ya esté duplicada ahí).
+6. **Sin secretos en git.** La cadena de SQL y la API key no se documentan en este archivo ni se imprimen en logs.
+7. **Residuo de plantilla fuera del producto.** `WeatherForecast` no se extiende. Se elimina solo si una fila `hacer` lo pida.
+8. **Contratos estables.** Rutas listadas arriba, formas `{ data }`, `{ summaries, picks }` y columnas de las dos tablas se mantienen hasta que un cambio pedido diga lo contrario.
+
+Así se genera una evolución: se parte de este estado, se aplica una fila `hacer`, y se vuelve a dejar el repositorio alineado con los ocho puntos.
+
+## Cambios pedidos
+
+Edita esta tabla. La IA implementa solo las filas `hacer`. Valores de estado: `hacer`, `no hacer`, `hecho`.
+
+| Id | Estado | Cambio | Hecho cuando |
+| --- | --- | --- | --- |
+| — | — | Ninguno pendiente. | — |
+
+## Bitácora
+
+| Versión | Fecha | Qué cambió en el producto o en este prompt |
+| --- | --- | --- |
+| 1.7 | 2026-11-10 | `dbo.spr_BestOdds_ValueBets`: unificación canónica de 2 lados (`OVER`/`UNDER`, `LINE_NEG`/`LINE_POS`, `AWAY`/`HOME`), eliminación de falsos positivos con `LadosEncontrados > 2`, De-Vig dual con `dbo.BestOddBooks` (ancla Stake) y habilitación de totales de partido completo en todos los deportes. |
+| 1.6 | 2026-11-10 | `OddsSync`: paginación sin solapamiento (`OffsetIncrement: 200`, `MaxOffset: 20000` y respeto a `NextOffset` / `Math.Max(OffsetIncrement, Limit)` en `SyncBestOddsUseCase`). |
+| 1.5 | 2026-11-10 | FrontBet: sync manual de arbitraje y ciclo de 60 s mientras la operación activa está encendida. En reposo sigue en 3 min. |
+| 1.4 | 2026-11-10 | Piso de cuota de value bets en 1.85. El default de `spr_BestOdds_ValueBets` y `ValueModel:MinOdds` (appsettings y los dos perfiles de launchSettings) quedaron alineados. El techo del SP pasó a 3.50. |
+| 1.3 | 2026-11-10 | C-002 hecho. `soccer` entra en `OddsSync`, `OddsFeed` y `OddsDelta`. El SP limita el fútbol a mercados de 2 vías. `POST /api/odds/best/sync` guardó 5213 filas de soccer. `GET /api/odds/best` respondió `{ picks, summaries }`. |
+| 1.2 | 2026-11-10 | El prompt vive solo en `.cursor/rules/prompt-maestro.mdc`. |
+| 1.1 | 2026-11-10 | C-001 hecho. `dbo.spr_BestOdds_ValueBets` audita De-Vig de 2 vías, descuento Shin, ancla Stake e incluye Soccer. `GET /api/odds/best` respondió `{ picks, summaries }`. |
+| 1.0 | 2026-11-10 | Primer snapshot de ApiBet y FrontBet. Sin cambios de código. |
+
+## Definición de listo
+
+Una fila `hacer` termina solo si:
+
+- El código cumple el texto de la fila y no rompe los ocho puntos del estado objetivo.
+- Este archivo quedó actualizado: la fila pasó a **Bitácora** o a estado `hecho`, y **Estado actual** menciona el comportamiento nuevo.
+- Si se tocó UI, se probó el flujo en el navegador (sync, tablas, error y vacío).
+- Si se tocó un endpoint, se comprobó la ruta afectada.
+- No quedaron secretos en el diff.

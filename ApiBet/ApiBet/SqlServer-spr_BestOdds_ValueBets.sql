@@ -1,22 +1,26 @@
 USE [Deportes];
 GO
+SET ANSI_NULLS ON;
+GO
+SET QUOTED_IDENTIFIER ON;
+GO
 
-CREATE OR ALTER PROCEDURE dbo.spr_BestOdds_ValueBets
+CREATE OR ALTER PROCEDURE [dbo].[spr_BestOdds_ValueBets]
     @Bankroll                DECIMAL(18, 2) = 1000000, -- Banca actual en COP
     @MaxStakePercent         DECIMAL(18, 8) = 1.75,    -- Máximo por apuesta individual (1.75%)
     @MaxTotalExposurePercent DECIMAL(18, 8) = 18.0,    -- Tope de banca comprometida
     @KellyFraction           DECIMAL(18, 8) = 0.30,    -- Fracción de Kelly (0.30)
     @MaxPicks                INT            = 10,      -- Top N picks a retornar
     @MinExpectedValue        DECIMAL(18, 8) = 0.020,   -- EV mínimo (2.0%)
-    @MaxExpectedValue        DECIMAL(18, 8) = 0.20,    -- EV máximo (20% para filtrar cuotas locas de 301.00)
-    @MinOdds                 DECIMAL(18, 4) = 1.35,    -- Cuota mínima
-    @MaxOdds                 DECIMAL(18, 4) = 3.80,    -- Cuota máxima rentable
+    @MaxExpectedValue        DECIMAL(18, 8) = 0.20,    -- EV máximo (20%)
+    @MinOdds                 DECIMAL(18, 4) = 1.85,    -- Piso de cuota en 1.85
+    @MaxOdds                 DECIMAL(18, 4) = 3.50,    -- Techo de cuota en 3.50
     @MinMinutesToStart       INT            = -15,     -- Permite hasta 15 min de tolerancia
-    @MaxMinutesToStart       INT            = 360,     -- Hasta 6 horas en Hora Colombia (cuando tiene hora)
+    @MaxMinutesToStart       INT            = 360,     -- Hasta 6 horas en Hora Colombia
     @StakeRoundToCop         DECIMAL(18, 0) = 1000,    -- Redondeo a múltiplos de $1,000 COP
     @MinStakeCop             DECIMAL(18, 0) = 5000,    -- Apuesta mínima en COP
     @IsMainLine              BIT            = 1,       -- 1 = Solo línea principal
-    @SoloConHoraExacta       BIT            = 0        -- 0 = Usa los 20,200 registros | 1 = Solo los 562 de MarketOddsDelta
+    @SoloConHoraExacta       BIT            = 0        -- 0 = Todos | 1 = Solo los de MarketOddsDelta
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -31,25 +35,28 @@ BEGIN
     IF @MaxPicks IS NULL OR @MaxPicks <= 0 SET @MaxPicks = 10;
     IF @StakeRoundToCop IS NULL OR @StakeRoundToCop <= 0 SET @StakeRoundToCop = 1000;
 
-    -- 2. Reloj Maestro en HORA COLOMBIA (Confirmado por Paso_7B de la radiografía)
+    -- 2. Reloj Maestro en HORA COLOMBIA (UTC-5) y ventana de fechas de respaldo
     DECLARE @NowColombia     DATETIME2 = DATEADD(HOUR, -5, SYSUTCDATETIME());
-    DECLARE @TodayColStr     CHAR(10)  = CONVERT(CHAR(10), CAST(@NowColombia AS DATE), 23);
-    -- En la tarde/noche de Colombia, los partidos de las próximas horas ya tienen fecha UTC del día siguiente en su EventId
-    DECLARE @TomorrowUtcStr  CHAR(10)  = CONVERT(CHAR(10), CAST(DATEADD(HOUR, 6, SYSUTCDATETIME()) AS DATE), 23);
+    DECLARE @TodayColDate    DATE      = CAST(@NowColombia AS DATE);
+    DECLARE @Day0ColStr      CHAR(10)  = CONVERT(CHAR(10), @TodayColDate, 23);
+    DECLARE @Day1ColStr      CHAR(10)  = CONVERT(CHAR(10), DATEADD(DAY, 1, @TodayColDate), 23);
+    DECLARE @Day2ColStr      CHAR(10)  = CONVERT(CHAR(10), DATEADD(DAY, 2, @TodayColDate), 23);
+    DECLARE @Day3ColStr      CHAR(10)  = CONVERT(CHAR(10), DATEADD(DAY, 3, @TodayColDate), 23);
 
     DECLARE @MaxStakeCop DECIMAL(18, 0)         = CAST(ROUND(@Bankroll * (@MaxStakePercent / 100.0), 0) AS DECIMAL(18, 0));
     DECLARE @MaxTotalExposureCop DECIMAL(18, 0) = CAST(ROUND(@Bankroll * (@MaxTotalExposurePercent / 100.0), 0) AS DECIMAL(18, 0));
 
-    -- 3. Deportes configurados
+    -- 3. Deportes configurados (Incluye Soccer / Football)
     DECLARE @PrimeSports TABLE (SportName VARCHAR(64) NOT NULL PRIMARY KEY);
     INSERT INTO @PrimeSports (SportName) VALUES
         ('Basketball'), ('Tennis'), ('Baseball'),
-        ('American Football'), ('MMA'), ('Hockey'), ('Ice Hockey');
+        ('American Football'), ('MMA'), ('Hockey'), ('Ice Hockey'),
+        ('Soccer'), ('Football');
 
     IF OBJECT_ID('tempdb..#Candidatos') IS NOT NULL
         DROP TABLE #Candidatos;
 
-    -- 4. Procesamiento de los 20,200 registros con LEFT JOIN a MarketOddsDelta
+    -- 4. Procesamiento con Unificación Canónica de 2 Vías y De-Vigging Dual (Consenso + Ancla Stake)
     ;WITH EventosConHora AS
     (
         SELECT
@@ -59,27 +66,132 @@ BEGIN
         FROM dbo.MarketOddsDelta AS m
         GROUP BY m.EventId
     ),
-    BestOddsSinDuplicados AS
+    RawOdds AS
     (
-        -- Elimina las filas repetidas que vimos en la segunda tabla de tu radiografía
         SELECT
             b.*,
-            DupRn = ROW_NUMBER() OVER (
-                        PARTITION BY b.EventId, b.MarketType, b.Selection, ISNULL(b.Line, -999999), b.BestBook
-                        ORDER BY b.BestDecimal DESC
-                    )
+            BooksCount    = ISNULL(NULLIF((SELECT COUNT(*) FROM dbo.BestOddBooks AS bb WHERE bb.BestOddId = b.Id), 0), 1),
+            StakeProb     = (
+                                SELECT TOP 1 CAST(1.0 / NULLIF(bb.[Decimal], 0) AS DECIMAL(18, 8))
+                                FROM dbo.BestOddBooks AS bb
+                                WHERE bb.BestOddId = b.Id
+                                  AND LOWER(bb.Book) LIKE '%stake%'
+                                  AND bb.[Decimal] > 1.0
+                                ORDER BY bb.[Decimal] ASC
+                            ),
+            AwayNorm      = REPLACE(REPLACE(REPLACE(LOWER(LTRIM(RTRIM(
+                                CASE
+                                    WHEN CHARINDEX(' @ ', b.EventName) > 0
+                                        THEN LEFT(b.EventName, CHARINDEX(' @ ', b.EventName) - 1)
+                                    ELSE b.EventName
+                                END
+                            ))), '-', ''), ' ', ''), '.', ''),
+            HomeNorm      = REPLACE(REPLACE(REPLACE(LOWER(LTRIM(RTRIM(
+                                CASE
+                                    WHEN CHARINDEX(' @ ', b.EventName) > 0
+                                        THEN SUBSTRING(b.EventName, CHARINDEX(' @ ', b.EventName) + 3, 500)
+                                    ELSE ''
+                                END
+                            ))), '-', ''), ' ', ''), '.', ''),
+            SelLower      = LOWER(LTRIM(RTRIM(b.Selection))),
+            SelNorm       = REPLACE(REPLACE(REPLACE(LOWER(LTRIM(RTRIM(b.Selection))), '-', ''), ' ', ''), '.', ''),
+            LineaMagnitud = ISNULL(ABS(b.Line), -999999),
+            p_cons        = CASE
+                                WHEN b.ConsensusProbability > 1.0 THEN CAST(b.ConsensusProbability / 100.0 AS DECIMAL(18, 8))
+                                ELSE CAST(b.ConsensusProbability AS DECIMAL(18, 8))
+                            END
         FROM dbo.BestOdds AS b
         WHERE (@IsMainLine IS NULL OR b.IsMainLine = @IsMainLine)
-          AND b.BestDecimal BETWEEN @MinOdds AND @MaxOdds
           AND b.ConsensusProbability IS NOT NULL
+          AND b.ConsensusProbability > 0
           AND (b.PlayerName IS NULL OR b.PlayerName = '')
+          -- Excluimos selecciones de empate explícitas ("Draw" / "Tie")
+          AND LOWER(LTRIM(RTRIM(b.Selection))) NOT IN ('draw', 'tie', 'empate', 'x')
+    ),
+    ConLadoCanonico AS
+    (
+        SELECT
+            r.*,
+            -- Agrupa variantes de nombres de equipos entre casas (ej. "Rostock" vs "Rostock Seawolves") en los 2 lados reales del partido
+            LadoCanonico = CASE
+                               WHEN r.SelLower = 'over' OR r.SelLower LIKE 'over %' OR r.SelLower LIKE '% over' THEN 'OVER'
+                               WHEN r.SelLower = 'under' OR r.SelLower LIKE 'under %' OR r.SelLower LIKE '% under' THEN 'UNDER'
+                               WHEN r.Line IS NOT NULL AND r.Line < 0 THEN 'LINE_NEG'
+                               WHEN r.Line IS NOT NULL AND r.Line > 0 THEN 'LINE_POS'
+                               WHEN LEN(r.AwayNorm) >= 4 AND (
+                                    CHARINDEX(r.SelNorm, r.AwayNorm) > 0
+                                    OR CHARINDEX(r.AwayNorm, r.SelNorm) > 0
+                                    OR CHARINDEX(LEFT(r.AwayNorm, 5), r.SelNorm) > 0
+                               ) THEN 'AWAY'
+                               WHEN LEN(r.HomeNorm) >= 4 AND (
+                                    CHARINDEX(r.SelNorm, r.HomeNorm) > 0
+                                    OR CHARINDEX(r.HomeNorm, r.SelNorm) > 0
+                                    OR CHARINDEX(LEFT(r.HomeNorm, 5), r.SelNorm) > 0
+                               ) THEN 'HOME'
+                               ELSE r.SelNorm
+                           END
+        FROM RawOdds AS r
+    ),
+    BestOddsLimpio AS
+    (
+        SELECT
+            c.*,
+            -- Consenso ponderado por cantidad de casas cuando el mismo lado vino separado por nombre de equipo
+            p_raw          = CAST(
+                                 SUM(c.p_cons * c.BooksCount) OVER (PARTITION BY c.EventId, c.MarketType, c.LineaMagnitud, c.LadoCanonico)
+                                 / NULLIF(SUM(c.BooksCount) OVER (PARTITION BY c.EventId, c.MarketType, c.LineaMagnitud, c.LadoCanonico), 0)
+                             AS DECIMAL(18, 8)),
+            p_stake_side   = MAX(ISNULL(c.StakeProb, -1.0)) OVER (PARTITION BY c.EventId, c.MarketType, c.LineaMagnitud, c.LadoCanonico),
+            TotalBooksLado = SUM(c.BooksCount) OVER (PARTITION BY c.EventId, c.MarketType, c.LineaMagnitud, c.LadoCanonico),
+            DupRn          = ROW_NUMBER() OVER (
+                                 PARTITION BY c.EventId, c.MarketType, c.LineaMagnitud, c.LadoCanonico
+                                 ORDER BY c.BestDecimal DESC, c.BooksCount DESC
+                             )
+        FROM ConLadoCanonico AS c
+    ),
+    AuditoriaMercado2Vias AS
+    (
+        SELECT
+            b.*,
+            LadosEncontrados = COUNT(*) OVER (PARTITION BY b.EventId, b.MarketType, b.LineaMagnitud),
+            SumaProbConsenso = SUM(b.p_raw) OVER (PARTITION BY b.EventId, b.MarketType, b.LineaMagnitud),
+            LadosStake       = SUM(CASE WHEN b.p_stake_side > 0 THEN 1 ELSE 0 END) OVER (PARTITION BY b.EventId, b.MarketType, b.LineaMagnitud),
+            SumaProbStake    = SUM(CASE WHEN b.p_stake_side > 0 THEN b.p_stake_side ELSE 0 END) OVER (PARTITION BY b.EventId, b.MarketType, b.LineaMagnitud)
+        FROM BestOddsLimpio AS b
+        WHERE b.DupRn = 1
+    ),
+    DeViggingCalculado AS
+    (
+        SELECT
+            a.*,
+            -- 1. De-Vig multiplicativo sobre el consenso general de ambos lados
+            p_cons_devig  = CASE
+                                WHEN a.LadosEncontrados = 2 AND a.SumaProbConsenso BETWEEN 0.94 AND 1.15
+                                    THEN a.p_raw / a.SumaProbConsenso
+                                -- Si solo vino 1 lado, exigimos al menos 2 casas en ese lado y aplicamos haircut realista (4.5%)
+                                WHEN a.LadosEncontrados = 1 AND a.TotalBooksLado >= 2
+                                    THEN a.p_raw / 1.045
+                                ELSE NULL
+                            END,
+            -- 2. De-Vig multiplicativo puro de Stake (cuando Stake cotiza los 2 lados y la mejor cuota está en Bwin/Betsson)
+            p_stake_devig = CASE
+                                WHEN a.LadosEncontrados = 2
+                                     AND a.LadosStake = 2
+                                     AND a.SumaProbStake BETWEEN 0.98 AND 1.15
+                                     AND LOWER(a.BestBook) NOT LIKE '%stake%'
+                                    THEN a.p_stake_side / a.SumaProbStake
+                                ELSE NULL
+                            END
+        FROM AuditoriaMercado2Vias AS a
+        WHERE a.BestDecimal BETWEEN @MinOdds AND @MaxOdds
+          AND a.LadosEncontrados IN (1, 2)
     ),
     Base AS
     (
         SELECT
             b.EventId,
             Partido           = b.EventName,
-            Deporte           = LTRIM(RTRIM(s.Name)),
+            Deporte           = CASE WHEN LTRIM(RTRIM(s.Name)) = 'Football' THEN 'Soccer' ELSE LTRIM(RTRIM(s.Name)) END,
             Liga              = l.DisplayName,
             MarketId          = b.MarketType,
             Mercado           = m.Name,
@@ -89,27 +201,44 @@ BEGIN
             Cuota             = b.BestDecimal,
             HoraInicioCol     = eh.EventStartTime,
             MinutosParaInicio = eh.MinutosCol,
-            p                 = CASE
-                                    WHEN b.ConsensusProbability > 1.0 THEN b.ConsensusProbability / 100.0
-                                    ELSE b.ConsensusProbability
-                                END,
+            b.LadosEncontrados,
+            b.SumaProbConsenso,
+            p                 = CAST(
+                                    (
+                                        CASE
+                                            -- Si la apuesta es en Bwin/Betsson y Stake tiene ambos lados más agudos que el promedio contaminado:
+                                            WHEN b.p_stake_devig IS NOT NULL AND b.p_cons_devig IS NOT NULL AND b.p_stake_devig > b.p_cons_devig
+                                                THEN (b.p_stake_devig * 0.65) + (b.p_cons_devig * 0.35)
+                                            ELSE ISNULL(b.p_cons_devig, b.p_stake_devig)
+                                        END
+                                    ) *
+                                    CASE
+                                        WHEN b.BestDecimal > 2.60 THEN 0.982
+                                        WHEN b.BestDecimal > 2.15 THEN 0.990
+                                        ELSE 1.000
+                                    END *
+                                    CASE
+                                        WHEN LOWER(b.BestBook) LIKE '%stake%' THEN 0.993
+                                        ELSE 1.000
+                                    END
+                                AS DECIMAL(18, 8)),
             MarketNorm        = REPLACE(REPLACE(REPLACE(LOWER(m.Name), '_', ''), ' ', ''), '-', '')
-        FROM BestOddsSinDuplicados AS b
+        FROM DeViggingCalculado AS b
         INNER JOIN dbo.Sports AS s ON s.Id = b.Sport
         INNER JOIN dbo.Leagues AS l ON l.Id = b.League
         INNER JOIN dbo.Markets AS m ON m.Id = b.MarketType
         INNER JOIN dbo.Sportsbooks AS sb ON sb.Id = b.BestBook
         INNER JOIN @PrimeSports AS ps ON ps.SportName = LTRIM(RTRIM(s.Name))
         LEFT JOIN EventosConHora AS eh ON eh.EventId = b.EventId
-        WHERE b.DupRn = 1
+        WHERE (b.p_cons_devig IS NOT NULL OR b.p_stake_devig IS NOT NULL)
           AND (
-                -- CASO 1: El evento existe en MarketOddsDelta y está dentro de la ventana de minutos en Colombia
                 (eh.EventId IS NOT NULL AND eh.MinutosCol BETWEEN @MinMinutesToStart AND @MaxMinutesToStart)
                 OR
-                -- CASO 2: El evento NO está en MarketOddsDelta (los otros 19,638 registros), filtramos por fecha actual/próxima en EventId
                 (@SoloConHoraExacta = 0 AND eh.EventId IS NULL AND (
-                    b.EventId LIKE '%' + @TodayColStr + '%'
-                    OR b.EventId LIKE '%' + @TomorrowUtcStr + '%'
+                    b.EventId LIKE '%' + @Day0ColStr + '%'
+                    OR b.EventId LIKE '%' + @Day1ColStr + '%'
+                    OR b.EventId LIKE '%' + @Day2ColStr + '%'
+                    OR b.EventId LIKE '%' + @Day3ColStr + '%'
                 ))
               )
     ),
@@ -118,18 +247,61 @@ BEGIN
         SELECT *
         FROM Base
         WHERE p > 0.08 AND p < 0.92
+          AND (LadosEncontrados <> 2 OR SumaProbConsenso BETWEEN 0.94 AND 1.15)
           AND (
-                MarketNorm LIKE '%moneyline%'
-                OR MarketNorm LIKE '%pointspread%'
-                OR MarketNorm LIKE '%asianhandicap%'
-                OR MarketNorm LIKE '%runline%'
-                OR MarketNorm LIKE '%puckline%'
-                OR MarketNorm LIKE '%gamespread%'
-                OR MarketNorm LIKE '%setspread%'
+                -- REGLA 1: Deportes americanos, básquet, hockey, tenis y MMA (Moneyline, Spreads y Totales de partido completo)
+                (
+                    Deporte <> 'Soccer'
+                    AND (
+                        MarketNorm LIKE '%moneyline%'
+                        OR MarketNorm LIKE '%pointspread%'
+                        OR MarketNorm LIKE '%asianhandicap%'
+                        OR MarketNorm LIKE '%runline%'
+                        OR MarketNorm LIKE '%puckline%'
+                        OR MarketNorm LIKE '%gamespread%'
+                        OR MarketNorm LIKE '%setspread%'
+                        OR (
+                            (
+                                MarketNorm LIKE '%totalpoints%'
+                                OR MarketNorm LIKE '%totalgoals%'
+                                OR MarketNorm LIKE '%totalruns%'
+                                OR MarketNorm LIKE '%totalgames%'
+                                OR MarketNorm = 'total'
+                                OR MarketNorm LIKE '%overunder%'
+                            )
+                            AND Linea IS NOT NULL
+                        )
+                    )
+                )
+                OR
+                -- REGLA 2: Exclusiva para SOCCER -> Solo mercados puros de 2 vías (Handicaps, Draw No Bet y Total Goals)
+                (
+                    Deporte = 'Soccer'
+                    AND (
+                        MarketNorm LIKE '%asianhandicap%'
+                        OR MarketNorm LIKE '%goalspread%'
+                        OR MarketNorm LIKE '%pointspread%'
+                        OR MarketNorm LIKE '%handicap%'
+                        OR MarketNorm LIKE '%drawnobet%'
+                        OR MarketNorm LIKE '%totalgoals%'
+                        OR MarketNorm LIKE '%total%'
+                        OR MarketNorm LIKE '%overunder%'
+                    )
+                    AND MarketNorm NOT LIKE '%moneyline%'
+                    AND MarketNorm NOT LIKE '%1x2%'
+                    AND (MarketNorm LIKE '%drawnobet%' OR Linea IS NOT NULL)
+                )
               )
+          -- Exclusiones globales (Totales por equipo, par/impar, jugadores, mitades, cuartos, períodos)
+          AND MarketNorm NOT LIKE '%teamtotal%'
+          AND MarketNorm NOT LIKE '%hometotal%'
+          AND MarketNorm NOT LIKE '%awaytotal%'
+          AND MarketNorm NOT LIKE '%player%'
+          AND MarketNorm NOT LIKE '%corner%'
+          AND MarketNorm NOT LIKE '%card%'
+          AND MarketNorm NOT LIKE '%oddeven%'
           AND MarketNorm NOT LIKE '%3way%'
           AND MarketNorm NOT LIKE '%regulation%'
-          AND MarketNorm NOT LIKE '%total%'
           AND MarketNorm NOT LIKE '%btts%'
           AND MarketNorm NOT LIKE '%bothteam%'
           AND MarketNorm NOT LIKE '%championship%'
@@ -137,6 +309,9 @@ BEGIN
           AND MarketNorm NOT LIKE '%winner%'
           AND MarketNorm NOT LIKE '%halftime%'
           AND MarketNorm NOT LIKE '%1st%'
+          AND MarketNorm NOT LIKE '%2nd%'
+          AND MarketNorm NOT LIKE '%3rd%'
+          AND MarketNorm NOT LIKE '%4th%'
           AND MarketNorm NOT LIKE '%period%'
           AND MarketNorm NOT LIKE '%quarter%'
           AND MarketNorm NOT LIKE '%half%'
@@ -146,15 +321,16 @@ BEGIN
     (
         SELECT
             m.*,
-            Implicita      = 1.0 / m.Cuota,
-            EV             = (m.p * m.Cuota) - 1.0,
-            b_neto         = m.Cuota - 1.0,
-            FactorDeporte  = CASE
-                                 WHEN m.Deporte IN ('Basketball', 'Baseball', 'American Football') THEN 1.00
-                                 WHEN m.Deporte IN ('Hockey', 'Ice Hockey', 'Tennis') THEN 0.90
-                                 WHEN m.Deporte = 'MMA' THEN 0.80
-                                 ELSE 0.85
-                             END
+            Implicita     = CAST(1.0 / m.Cuota AS DECIMAL(18, 8)),
+            EV            = CAST((m.p * m.Cuota) - 1.0 AS DECIMAL(18, 8)),
+            b_neto        = CAST(m.Cuota - 1.0 AS DECIMAL(18, 8)),
+            FactorDeporte = CASE
+                                WHEN m.Deporte IN ('Basketball', 'Baseball', 'American Football') THEN 1.00
+                                WHEN m.Deporte = 'Soccer' THEN 0.95
+                                WHEN m.Deporte IN ('Hockey', 'Ice Hockey', 'Tennis') THEN 0.90
+                                WHEN m.Deporte = 'MMA' THEN 0.80
+                                ELSE 0.85
+                            END
         FROM MercadosPrincipales AS m
     ),
     KellyOptimizado AS
@@ -165,6 +341,7 @@ BEGIN
             FactorFinal = @KellyFraction
                           * FactorDeporte
                           * (CASE WHEN Cuota > 2.40 THEN (2.40 / Cuota) ELSE 1.0 END)
+                          * (CASE WHEN LadosEncontrados = 2 THEN 1.00 ELSE 0.85 END)
         FROM CalculoEv
         WHERE EV >= @MinExpectedValue
           AND EV <= @MaxExpectedValue
@@ -175,10 +352,10 @@ BEGIN
             *,
             KellyApplied   = KellyFull * FactorFinal,
             ExpectedGrowth = (p * LOG(1.0 + ((KellyFull * FactorFinal) * b_neto)))
-                           + ((1.0 - p) * LOG(1.0 - (KellyFull * FactorFinal))),
+                             + ((1.0 - p) * LOG(1.0 - (KellyFull * FactorFinal))),
             StakeBruto     = CASE
-                                WHEN (@Bankroll * (KellyFull * FactorFinal)) > @MaxStakeCop THEN @MaxStakeCop
-                                ELSE (@Bankroll * (KellyFull * FactorFinal))
+                                 WHEN (@Bankroll * (KellyFull * FactorFinal)) > @MaxStakeCop THEN @MaxStakeCop
+                                 ELSE (@Bankroll * (KellyFull * FactorFinal))
                              END
         FROM KellyOptimizado
         WHERE (KellyFull * FactorFinal) > 0
@@ -186,6 +363,7 @@ BEGIN
     SELECT
         EventId, Partido, Deporte, Liga, Mercado, ApostarA, Linea, Casa, Cuota,
         HoraInicioCol, MinutosParaInicio, p, Implicita, EV, KellyFull, KellyApplied, ExpectedGrowth,
+        LadosEncontrados,
         Stake = CAST(ROUND(StakeBruto / @StakeRoundToCop, 0) * @StakeRoundToCop AS DECIMAL(18, 0))
     INTO #Candidatos
     FROM CalculoStakes;
@@ -217,18 +395,18 @@ BEGIN
     SELECT TOP (@MaxPicks)
         Pick                 = r.PickOrder,
         Senal                = CASE
-                                 WHEN r.EV >= 0.05 AND r.Cuota <= 2.15 THEN '🔥 ELITE (+EV Alto)'
-                                 WHEN r.EV >= 0.035 THEN '⭐ ALTA CONFIANZA'
-                                 ELSE '✅ VALOR SOLIDO'
+                                   WHEN r.EV >= 0.05 AND r.Cuota <= 2.15 AND r.LadosEncontrados = 2 THEN N'🔥 ELITE (De-Vig 2 Vías)'
+                                   WHEN r.EV >= 0.035 THEN N'⭐ ALTA CONFIANZA'
+                                   ELSE N'✅ VALOR SOLIDO'
                                END,
         r.Deporte,
         r.Liga,
         r.Partido,
         MinutosFaltantes     = ISNULL(r.MinutosParaInicio, 0),
         EstadoHorario        = CASE
-                                 WHEN r.MinutosParaInicio IS NOT NULL
-                                      THEN CONCAT('En ', r.MinutosParaInicio, ' min (', FORMAT(r.HoraInicioCol, 'HH:mm'), ' COL)')
-                                 ELSE 'Hoy / Próximas horas (Verificar hora en casa)'
+                                   WHEN r.MinutosParaInicio IS NOT NULL
+                                        THEN CONCAT('En ', r.MinutosParaInicio, ' min (', FORMAT(r.HoraInicioCol, 'HH:mm'), ' COL)')
+                                   ELSE 'Hoy / Próximas horas (Verificar hora en casa)'
                                END,
         r.Mercado,
         r.ApostarA,
@@ -244,13 +422,13 @@ BEGIN
         GananciaEsperadaCop  = CAST(ROUND(r.Stake * r.EV, 0) AS DECIMAL(18, 0)),
         RiesgoAcumuladoCop   = r.ExposicionAcumulada,
         Instruccion          = CONCAT(
-                                 'Apostar $', FORMAT(r.Stake, 'N0', 'es-CO'), ' COP en ', r.Casa,
-                                 ' a ', r.ApostarA,
-                                 ' (', r.Mercado,
-                                 CASE WHEN r.Linea IS NULL THEN '' ELSE CONCAT(' ', CAST(r.Linea AS DECIMAL(18, 2))) END,
-                                 ') @ ', CAST(r.Cuota AS DECIMAL(18, 2)),
-                                 ' [Min aceptable: ', CAST((1.0 + @MinExpectedValue) / r.p AS DECIMAL(18, 2)), ']',
-                                 ' | EV: +', CAST(r.EV * 100.0 AS DECIMAL(18, 2)), '%'
+                                   'Apostar $', FORMAT(r.Stake, 'N0', 'es-CO'), ' COP en ', r.Casa,
+                                   ' a ', r.ApostarA,
+                                   ' (', r.Mercado,
+                                   CASE WHEN r.Linea IS NULL THEN '' ELSE CONCAT(' ', CAST(r.Linea AS DECIMAL(18, 2))) END,
+                                   ') @ ', CAST(r.Cuota AS DECIMAL(18, 2)),
+                                   ' [Min aceptable: ', CAST((1.0 + @MinExpectedValue) / r.p AS DECIMAL(18, 2)), ']',
+                                   ' | EV Real: +', CAST(r.EV * 100.0 AS DECIMAL(18, 2)), '%'
                                )
     FROM CarteraActiva AS r
     WHERE r.ExposicionAcumulada <= @MaxTotalExposureCop
@@ -262,7 +440,7 @@ BEGIN
         Liga,
         PartidosConValor   = COUNT(DISTINCT EventId),
         PicksTotales       = COUNT(*),
-        SurebetsDetectadas = 0,
+        SurebetsDetectadas = SUM(CASE WHEN LadosEncontrados = 2 THEN 1 ELSE 0 END),
         ConHoraExacta      = SUM(CASE WHEN MinutosParaInicio IS NOT NULL THEN 1 ELSE 0 END),
         EvMedioPct         = CAST(AVG(EV) * 100.0 AS DECIMAL(18, 2)),
         CuotaMedia         = CAST(AVG(Cuota) AS DECIMAL(18, 2))

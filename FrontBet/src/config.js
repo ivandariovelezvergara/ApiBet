@@ -14,6 +14,7 @@ export const config = {
     syncPath: textEnv('VITE_ARBITRAGE_SYNC_PATH', '/api/arbitrage/sync'),
     getPath: textEnv('VITE_ARBITRAGE_GET_PATH', '/api/arbitrage'),
     intervalMs: numberEnv('VITE_ARBITRAGE_INTERVAL_MINUTES', 3) * 60 * 1000,
+    activeIntervalMs: numberEnv('VITE_ARBITRAGE_ACTIVE_INTERVAL_SECONDS', 60) * 1000,
   },
   odds: {
     deltaSyncPath: textEnv('VITE_ODDS_DELTA_SYNC_PATH', '/api/odds/delta/sync'),

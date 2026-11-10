@@ -4,16 +4,45 @@ import { useBackgroundJobs } from './useBackgroundJobs'
 import './App.css'
 
 function App() {
-  const { catalogs, arbitrage, odds, tables } = useBackgroundJobs()
+  const {
+    catalogs,
+    arbitrage,
+    odds,
+    tables,
+    activeOperation,
+    arbitrageIntervalMs,
+    setActiveOperation,
+    syncArbitrageNow,
+  } = useBackgroundJobs()
+  const arbitrageEvery = formatInterval(arbitrageIntervalMs)
 
   return (
     <main className="page">
       <header className="hero">
         <p className="eyebrow">ApiBet</p>
         <h1>Oportunidades</h1>
+        <div className="sync-actions">
+          <button
+            type="button"
+            className="primary"
+            onClick={() => syncArbitrageNow()}
+            disabled={arbitrage.running}
+          >
+            {arbitrage.running ? 'Sincronizando arbitraje…' : 'Sync manual inmediato'}
+          </button>
+          <button
+            type="button"
+            aria-pressed={activeOperation}
+            onClick={() => setActiveOperation(!activeOperation)}
+          >
+            {activeOperation
+              ? `Operación activa · arbitraje cada ${arbitrageEvery}`
+              : 'Activar operación · arbitraje cada 60 s'}
+          </button>
+        </div>
         <div className="sync-status">
           <p>{formatCatalogsSync(catalogs)}</p>
-          <p>{formatArbitrageSync(arbitrage)}</p>
+          <p>{formatArbitrageSync(arbitrage, arbitrageEvery)}</p>
           <p>{formatOddsSync(odds)}</p>
         </div>
       </header>
@@ -45,20 +74,32 @@ function formatCatalogsSync(sync) {
   return 'Catálogos: pendiente del arranque.'
 }
 
-function formatArbitrageSync(sync) {
+function formatInterval(intervalMs) {
+  if (intervalMs === 60000) {
+    return '60 s'
+  }
+  if (intervalMs % 60000 === 0) {
+    const minutes = intervalMs / 60000
+    return minutes === 1 ? '1 min' : `${minutes} min`
+  }
+  const seconds = Math.round(intervalMs / 1000)
+  return `${seconds} s`
+}
+
+function formatArbitrageSync(sync, every) {
   if (sync.running) {
-    return 'Arbitraje: sincronizando en segundo plano…'
+    return `Arbitraje: sincronizando ahora · siguiente ciclo cada ${every}…`
   }
   if (sync.error) {
     return `Arbitraje: ${sync.error}`
   }
   if (sync.result?.lastSyncedAtUtc) {
     const count = sync.result.storedCount
-    return `Arbitraje: última sync ${formatDate(sync.result.lastSyncedAtUtc)}${
+    return `Arbitraje: cada ${every} · última sync ${formatDate(sync.result.lastSyncedAtUtc)}${
       count != null ? ` · ${count} filas` : ''
     }`
   }
-  return 'Arbitraje: espera a que terminen los catálogos.'
+  return `Arbitraje: cada ${every}. Espera a que terminen los catálogos.`
 }
 
 function formatOddsSync(sync) {

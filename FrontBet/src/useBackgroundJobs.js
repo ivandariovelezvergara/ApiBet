@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ARBITRAGE_ACTIVE_INTERVAL_MS,
   ARBITRAGE_SYNC_INTERVAL_MS,
   CATALOGS_SYNC_INTERVAL_MS,
   getCatalogsSyncDelayMs,
@@ -16,7 +17,14 @@ const idleStatus = {
   error: '',
 }
 
+const ACTIVE_OPERATION_KEY = 'frontbet.arbitrage.activeOperation'
+
+function readActiveOperation() {
+  return window.localStorage.getItem(ACTIVE_OPERATION_KEY) === '1'
+}
+
 export function useBackgroundJobs() {
+  const [activeOperation, setActiveOperationState] = useState(readActiveOperation)
   const [catalogs, setCatalogs] = useState(idleStatus)
   const [arbitrage, setArbitrage] = useState(idleStatus)
   const [odds, setOdds] = useState(idleStatus)
@@ -36,10 +44,93 @@ export function useBackgroundJobs() {
     oddsLoading: true,
   })
 
+  const cancelledRef = useRef(false)
+  const readyRef = useRef(false)
+  const arbitrageTimerRef = useRef(0)
+  const runArbitrageRef = useRef(async () => {})
+  const scheduleArbitrageRef = useRef(() => {})
+  const arbitrageIntervalMs = activeOperation
+    ? ARBITRAGE_ACTIVE_INTERVAL_MS
+    : ARBITRAGE_SYNC_INTERVAL_MS
+  const intervalRef = useRef(arbitrageIntervalMs)
+
+  const runArbitrage = useCallback(async () => {
+    setArbitrage((current) => ({ ...current, running: true, error: '' }))
+    setTables((current) => ({ ...current, arbitrageLoading: true, arbitrageError: '' }))
+
+    try {
+      const { sync, catalog, syncError } = await runArbitrageCycle()
+      if (cancelledRef.current) {
+        return
+      }
+
+      const message = syncError?.message || ''
+      setTables((current) => ({
+        ...current,
+        arbitrageRows: catalog?.data ?? [],
+        arbitrageError: message,
+        arbitrageLoading: false,
+      }))
+      setArbitrage({
+        running: false,
+        result: sync,
+        error: message,
+      })
+    } catch (cause) {
+      if (cancelledRef.current) {
+        return
+      }
+
+      const message = cause.message || 'No se pudo cargar el arbitraje.'
+      setTables((current) => ({
+        ...current,
+        arbitrageError: message,
+        arbitrageLoading: false,
+      }))
+      setArbitrage((current) => ({
+        ...current,
+        running: false,
+        error: message,
+      }))
+    }
+  }, [])
+
+  useEffect(() => {
+    runArbitrageRef.current = runArbitrage
+    intervalRef.current = arbitrageIntervalMs
+  }, [runArbitrage, arbitrageIntervalMs])
+
+  const scheduleArbitrage = useCallback(() => {
+    window.clearTimeout(arbitrageTimerRef.current)
+    arbitrageTimerRef.current = window.setTimeout(async () => {
+      await runArbitrageRef.current()
+      if (!cancelledRef.current) {
+        scheduleArbitrageRef.current()
+      }
+    }, intervalRef.current)
+  }, [])
+
+  useEffect(() => {
+    scheduleArbitrageRef.current = scheduleArbitrage
+  }, [scheduleArbitrage])
+
+  const syncArbitrageNow = useCallback(async () => {
+    window.clearTimeout(arbitrageTimerRef.current)
+    await runArbitrageRef.current()
+    if (!cancelledRef.current && readyRef.current) {
+      scheduleArbitrage()
+    }
+  }, [scheduleArbitrage])
+
+  function setActiveOperation(next) {
+    window.localStorage.setItem(ACTIVE_OPERATION_KEY, next ? '1' : '0')
+    setActiveOperationState(next)
+  }
+
   useEffect(() => {
     let cancelled = false
+    cancelledRef.current = false
     let catalogsTimer
-    let arbitrageTimer
     let oddsTimer
 
     async function runCatalogs() {
@@ -83,47 +174,6 @@ export function useBackgroundJobs() {
           catalogsLoading: false,
         }))
         setCatalogs((current) => ({
-          ...current,
-          running: false,
-          error: message,
-        }))
-      }
-    }
-
-    async function runArbitrage() {
-      setArbitrage((current) => ({ ...current, running: true, error: '' }))
-      setTables((current) => ({ ...current, arbitrageLoading: true, arbitrageError: '' }))
-
-      try {
-        const { sync, catalog, syncError } = await runArbitrageCycle()
-        if (cancelled) {
-          return
-        }
-
-        const message = syncError?.message || ''
-        setTables((current) => ({
-          ...current,
-          arbitrageRows: catalog?.data ?? [],
-          arbitrageError: message,
-          arbitrageLoading: false,
-        }))
-        setArbitrage({
-          running: false,
-          result: sync,
-          error: message,
-        })
-      } catch (cause) {
-        if (cancelled) {
-          return
-        }
-
-        const message = cause.message || 'No se pudo cargar el arbitraje.'
-        setTables((current) => ({
-          ...current,
-          arbitrageError: message,
-          arbitrageLoading: false,
-        }))
-        setArbitrage((current) => ({
           ...current,
           running: false,
           error: message,
@@ -186,13 +236,6 @@ export function useBackgroundJobs() {
         }
       }, catalogsDelay)
 
-      async function arbitrageLoop() {
-        await runArbitrage()
-        if (!cancelled) {
-          arbitrageTimer = window.setTimeout(arbitrageLoop, ARBITRAGE_SYNC_INTERVAL_MS)
-        }
-      }
-
       async function oddsLoop() {
         await runOdds()
         if (!cancelled) {
@@ -200,7 +243,11 @@ export function useBackgroundJobs() {
         }
       }
 
-      arbitrageLoop()
+      readyRef.current = true
+      await runArbitrageRef.current()
+      if (!cancelled) {
+        scheduleArbitrage()
+      }
       oddsLoop()
     }
 
@@ -208,11 +255,40 @@ export function useBackgroundJobs() {
 
     return () => {
       cancelled = true
+      cancelledRef.current = true
+      readyRef.current = false
       window.clearTimeout(catalogsTimer)
-      window.clearTimeout(arbitrageTimer)
+      window.clearTimeout(arbitrageTimerRef.current)
       window.clearTimeout(oddsTimer)
     }
-  }, [])
+  }, [scheduleArbitrage])
 
-  return { catalogs, arbitrage, odds, tables }
+  const skipIntervalReset = useRef(true)
+  useEffect(() => {
+    if (skipIntervalReset.current) {
+      skipIntervalReset.current = false
+      return
+    }
+    if (!readyRef.current || cancelledRef.current) {
+      return
+    }
+
+    if (activeOperation) {
+      syncArbitrageNow()
+      return
+    }
+
+    scheduleArbitrage()
+  }, [activeOperation, scheduleArbitrage, syncArbitrageNow])
+
+  return {
+    catalogs,
+    arbitrage,
+    odds,
+    tables,
+    activeOperation,
+    arbitrageIntervalMs,
+    setActiveOperation,
+    syncArbitrageNow,
+  }
 }

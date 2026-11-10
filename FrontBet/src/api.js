@@ -8,6 +8,7 @@ let arbitrageCycleInFlight = null
 const CATALOGS_SYNC_KEY = 'frontbet.catalogs.lastSyncAt'
 export const CATALOGS_SYNC_INTERVAL_MS = config.catalogs.intervalMs
 export const ARBITRAGE_SYNC_INTERVAL_MS = config.arbitrage.intervalMs
+export const ARBITRAGE_ACTIVE_INTERVAL_MS = config.arbitrage.activeIntervalMs
 export const ODDS_SYNC_INTERVAL_MS = config.odds.intervalMs
 
 export function getJson(path) {

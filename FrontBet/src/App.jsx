@@ -13,6 +13,8 @@ function App() {
     arbitrageIntervalMs,
     setActiveOperation,
     syncArbitrageNow,
+    registerValueBet,
+    changeBetStatus,
   } = useBackgroundJobs()
   const arbitrageEvery = formatInterval(arbitrageIntervalMs)
 
@@ -47,7 +49,11 @@ function App() {
         </div>
       </header>
 
-      <ResultTables tables={tables} />
+      <ResultTables
+        tables={tables}
+        onRegisterValueBet={registerValueBet}
+        onChangeBetStatus={changeBetStatus}
+      />
     </main>
   )
 }

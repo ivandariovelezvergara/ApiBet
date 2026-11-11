@@ -24,6 +24,7 @@ CREATE OR ALTER PROCEDURE [dbo].[spr_BestOdds_ValueBets]
 AS
 BEGIN
     SET NOCOUNT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
     -- 1. Validaciones
     IF @Bankroll IS NULL OR @Bankroll <= 0
@@ -63,17 +64,18 @@ BEGIN
             m.EventId,
             EventStartTime = MIN(m.EventStartTime),
             MinutosCol     = DATEDIFF(MINUTE, @NowColombia, MIN(m.EventStartTime))
-        FROM dbo.MarketOddsDelta AS m
+        FROM dbo.MarketOddsDelta AS m WITH (NOLOCK)
+        WHERE m.EventStartTime IS NOT NULL
         GROUP BY m.EventId
     ),
     RawOdds AS
     (
         SELECT
             b.*,
-            BooksCount    = ISNULL(NULLIF((SELECT COUNT(*) FROM dbo.BestOddBooks AS bb WHERE bb.BestOddId = b.Id), 0), 1),
+            BooksCount    = ISNULL(NULLIF((SELECT COUNT(*) FROM dbo.BestOddBooks AS bb WITH (NOLOCK) WHERE bb.BestOddId = b.Id), 0), 1),
             StakeProb     = (
                                 SELECT TOP 1 CAST(1.0 / NULLIF(bb.[Decimal], 0) AS DECIMAL(18, 8))
-                                FROM dbo.BestOddBooks AS bb
+                                FROM dbo.BestOddBooks AS bb WITH (NOLOCK)
                                 WHERE bb.BestOddId = b.Id
                                   AND LOWER(bb.Book) LIKE '%stake%'
                                   AND bb.[Decimal] > 1.0
@@ -100,7 +102,7 @@ BEGIN
                                 WHEN b.ConsensusProbability > 1.0 THEN CAST(b.ConsensusProbability / 100.0 AS DECIMAL(18, 8))
                                 ELSE CAST(b.ConsensusProbability AS DECIMAL(18, 8))
                             END
-        FROM dbo.BestOdds AS b
+        FROM dbo.BestOdds AS b WITH (NOLOCK)
         WHERE (@IsMainLine IS NULL OR b.IsMainLine = @IsMainLine)
           AND b.ConsensusProbability IS NOT NULL
           AND b.ConsensusProbability > 0
@@ -224,10 +226,10 @@ BEGIN
                                 AS DECIMAL(18, 8)),
             MarketNorm        = REPLACE(REPLACE(REPLACE(LOWER(m.Name), '_', ''), ' ', ''), '-', '')
         FROM DeViggingCalculado AS b
-        INNER JOIN dbo.Sports AS s ON s.Id = b.Sport
-        INNER JOIN dbo.Leagues AS l ON l.Id = b.League
-        INNER JOIN dbo.Markets AS m ON m.Id = b.MarketType
-        INNER JOIN dbo.Sportsbooks AS sb ON sb.Id = b.BestBook
+        INNER JOIN dbo.Sports AS s WITH (NOLOCK) ON s.Id = b.Sport
+        INNER JOIN dbo.Leagues AS l WITH (NOLOCK) ON l.Id = b.League
+        INNER JOIN dbo.Markets AS m WITH (NOLOCK) ON m.Id = b.MarketType
+        INNER JOIN dbo.Sportsbooks AS sb WITH (NOLOCK) ON sb.Id = b.BestBook
         INNER JOIN @PrimeSports AS ps ON ps.SportName = LTRIM(RTRIM(s.Name))
         LEFT JOIN EventosConHora AS eh ON eh.EventId = b.EventId
         WHERE (b.p_cons_devig IS NOT NULL OR b.p_stake_devig IS NOT NULL)
@@ -369,6 +371,14 @@ BEGIN
     FROM CalculoStakes;
 
     -- 5. Selección del Mejor Pick por Partido y Control de Exposición Total
+    DECLARE @RiesgoActivoPlacedBetsCop DECIMAL(18, 0) = 0;
+    IF OBJECT_ID(N'dbo.PlacedBets', N'U') IS NOT NULL
+    BEGIN
+        SELECT @RiesgoActivoPlacedBetsCop = ISNULL(SUM(pb.StakeCop), 0)
+        FROM dbo.PlacedBets AS pb WITH (NOLOCK)
+        WHERE pb.Estado = 'PENDING';
+    END;
+
     ;WITH MejorPorPartido AS
     (
         SELECT
@@ -379,13 +389,20 @@ BEGIN
             )
         FROM #Candidatos AS c
         WHERE c.Stake >= @MinStakeCop
+          AND NOT EXISTS (
+              SELECT 1
+              FROM dbo.PlacedBets AS pb WITH (NOLOCK)
+              WHERE OBJECT_ID(N'dbo.PlacedBets', N'U') IS NOT NULL
+                AND pb.Estado = 'PENDING'
+                AND pb.Partido = c.Partido
+          )
     ),
     CarteraActiva AS
     (
         SELECT
             m.*,
             PickOrder = ROW_NUMBER() OVER (ORDER BY m.ExpectedGrowth DESC, m.EV DESC),
-            ExposicionAcumulada = SUM(m.Stake) OVER (
+            ExposicionAcumulada = @RiesgoActivoPlacedBetsCop + SUM(m.Stake) OVER (
                 ORDER BY m.ExpectedGrowth DESC, m.EV DESC
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             )

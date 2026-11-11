@@ -5,8 +5,8 @@ alwaysApply: true
 
 # Prompt maestro — ApiBet + FrontBet
 
-Versión: 1.7
-Fecha: 2026-11-10
+Versión: 1.8
+Fecha: 2026-11-11
 Idioma de trabajo: español. Identificadores de código, rutas y tablas se mantienen como están.
 
 Este archivo es la única especificación del producto. Lo que está en **Estado actual** describe el repositorio. Lo que está en **Estado objetivo** es el contrato de cómo debe quedar. Lo que está en **Cambios pedidos** es lo único que se implementa en esa sesión.
@@ -97,18 +97,21 @@ Secciones en `appsettings.json`. Varias se duplican como variables de entorno en
 | `POST /api/odds/sync` | `SyncOdds` | Vacía y recarga `MarketOdds` con `OddsFeed`. No lo usa el front. |
 | `POST /api/odds/delta/sync` | `SyncOddsDelta` | Vacía `MarketOddsDelta` y aplica `dbo.spr_MarketOddsDelta_DeltaLoad`. No toca `MarketOdds`. |
 | `POST /api/odds/best/sync` | `SyncBestOdds` | Mejores cuotas con `OddsSync` hacia SQL. |
-| `GET /api/odds/best` | `GetBestOdds` | Value bets vía `dbo.spr_BestOdds_ValueBets` y `ValueModel`. El SP unifica variantes de nombres de equipos en los 2 lados canónicos del partido (`OVER`/`UNDER`, `LINE_NEG`/`LINE_POS`, `AWAY`/`HOME`), bloquea mercados con más de 2 lados, aplica De-Vig dual (consenso general + De-Vig de `BestOddBooks` sobre Stake cuando se apuesta en Bwin/Betsson) y permite Totales principales de partido completo en todos los deportes (bloqueando 1X2/Moneyline en Soccer, Team Totals, Odd/Even, player props, córners, tarjetas y mitades/cuartos/períodos). La API no envía `@SoloConHoraExacta` (queda en 0). Los umbrales de banca, EV, cuotas y minutos siguen saliendo de `ValueModel`. La cuota mínima que envía la API es 1.85. |
+| `GET /api/odds/best` | `GetBestOdds` | Value bets vía `dbo.spr_BestOdds_ValueBets` y `ValueModel`. El SP unifica variantes de nombres de equipos en los 2 lados canónicos del partido (`OVER`/`UNDER`, `LINE_NEG`/`LINE_POS`, `AWAY`/`HOME`), bloquea mercados con más de 2 lados, aplica De-Vig dual (consenso general + De-Vig de `BestOddBooks` sobre Stake cuando se apuesta en Bwin/Betsson), permite Totales principales de partido completo en todos los deportes y descuenta la exposición activa de `dbo.PlacedBets`. La API no envía `@SoloConHoraExacta` (queda en 0). Los umbrales de banca, EV, cuotas y minutos siguen saliendo de `ValueModel`. La cuota mínima que envía la API es 1.85. |
+| `GET /api/bets` | `GetPlacedBets` | Bitácora de apuestas ejecutadas (`data`) y métricas globales de CLV / ROI (`summary`) vía `dbo.spr_PlacedBets_Get`. |
+| `POST /api/bets` | `CreatePlacedBet` | Registra una apuesta ejecutada en `dbo.PlacedBets` vía `dbo.spr_PlacedBets_Insert`. |
+| `PATCH /api/bets/{id}/status` | `UpdatePlacedBetStatus` | Liquida una apuesta (`WON`, `LOST`, `PUSH`, `VOID`, `PENDING`) vía `dbo.spr_PlacedBets_UpdateStatus` y calcula `ProfitRealCop`. |
 
 Los GET de catálogo devuelven `{ data: [...] }`. Arbitraje devuelve boletas en `data`. Value bets devuelven `summaries` y `picks`.
 
 ### SQL Server
 
-Script de tablas y procedimientos: `ApiBet/ApiBet/SqlServer-CreateTables.md`. Procedimiento de value bets: `ApiBet/ApiBet/SqlServer-spr_BestOdds_ValueBets.sql`. Ajuste de hora local: `ApiBet/ApiBet/SqlServer-FixCreatedAtLocal.sql`.
+Script de tablas y procedimientos: `ApiBet/ApiBet/SqlServer-CreateTables.md`. Procedimiento de value bets: `ApiBet/ApiBet/SqlServer-spr_BestOdds_ValueBets.sql`. Bitácora de apuestas y CLV: `ApiBet/ApiBet/SqlServer-PlacedBets.sql`. Ajuste de hora local: `ApiBet/ApiBet/SqlServer-FixCreatedAtLocal.sql`.
 
 Tablas de catálogo: `Sports`, `SportLeagues`, `Leagues`, `Sportsbooks`, `SportsbookRegions`, `Markets`, `MarketSports`.
 Cuotas: `BestOdds`, `BestOddBooks`, `MarketOdds`, `MarketOddsDelta`.
-Arbitraje: oportunidades y patas, más `CatalogSyncState`.
-Procedimientos que la API invoca: `spr_BestOdds_BulkLoad`, `spr_BestOdds_ValueBets`, `spr_MarketOdds_BulkLoad`, `spr_MarketOddsDelta_DeltaLoad`, `spr_ArbitrageOpportunities_BulkLoad`, `spr_ArbitrageOpportunities`. También existen `spr_BestOdds_CsvData` y `spr_BestOdds_ExportCsv`.
+Arbitraje y bitácora: oportunidades y patas, `PlacedBets`, más `CatalogSyncState`.
+Procedimientos que la API invoca: `spr_BestOdds_BulkLoad`, `spr_BestOdds_ValueBets`, `spr_MarketOdds_BulkLoad`, `spr_MarketOddsDelta_DeltaLoad`, `spr_ArbitrageOpportunities_BulkLoad`, `spr_ArbitrageOpportunities`, `spr_PlacedBets_Insert`, `spr_PlacedBets_UpdateStatus`, `spr_PlacedBets_Get`, `spr_PlacedBets_SyncClosingOdds`. También existen `spr_BestOdds_CsvData` y `spr_BestOdds_ExportCsv`.
 
 `spr_BestOdds_ValueBets` (archivo `SqlServer-spr_BestOdds_ValueBets.sql`, aplicado en `Deportes`) devuelve los mismos dos resultados de siempre: picks y resumen. El resumen suma `SurebetsDetectadas` cuando el mercado tiene 2 lados y agrega `ConHoraExacta`, que la API no mapea. El JSON de `GET /api/odds/best` sigue siendo `{ picks, summaries }` con las propiedades que ya leía `BestOddsRepository`. `Soccer` usa factor de Kelly 0.95.
 
@@ -130,7 +133,7 @@ Ciclo de arbitraje: `POST /api/arbitrage/sync` y luego `GET /api/arbitrage`. Si 
 
 Ciclo de odds: `POST /api/odds/delta/sync`, luego `POST /api/odds/best/sync`, luego `GET /api/odds/best`. Un POST fallido no cancela el otro. El front no llama `POST /api/odds/sync`.
 
-La pantalla muestra el botón de sync manual, el interruptor de operación activa, el estado de las tres syncs y dos tablas: **Arbitraje** y **Value bets** (`picks`). Los catálogos se cargan en estado y no se renderizan. `summaries` llega de la API y no se pinta.
+La pantalla muestra el botón de sync manual, el interruptor de operación activa, el estado de las tres syncs y tres tablas: **Arbitraje**, **Value bets** (`picks`, con botón **Apostar / Registrar**) y **Bitácora de apuestas ejecutadas (CLV & ROI)** (`placedBets`, con resumen de P&L/ROI/CLV y botones **Ganada / Perdida / Push / Reabrir**). Los catálogos se cargan en estado y no se renderizan. `summaries` llega de la API y no se pinta.
 
 Columnas de arbitraje: deporte, liga, partido, inicio, en vivo, creado, mercado, casa/selección/cuota/monto de cada lado, banca, ganancia, total neto, instrucción.
 Columnas de value bets: señal, deporte, liga, partido, mercado, apostar a, casa, cuota actual, cuota mínima rentable, probabilidad de consenso, probabilidad implícita, instrucción.
@@ -168,6 +171,7 @@ Edita esta tabla. La IA implementa solo las filas `hacer`. Valores de estado: `h
 
 | Versión | Fecha | Qué cambió en el producto o en este prompt |
 | --- | --- | --- |
+| 1.8 | 2026-11-11 | Módulo de Bitácora de Apuestas Ejecutadas (`dbo.PlacedBets`) y Cierre de Línea (CLV): script `SqlServer-PlacedBets.sql`, endpoints `GET/POST /api/bets` y `PATCH /api/bets/{id}/status`, descuento de exposición activa en `spr_BestOdds_ValueBets`, botón "Apostar / Registrar" en Value Bets y tabla de bitácora con CLV y liquidación Won/Lost/Push en FrontBet. |
 | 1.7 | 2026-11-10 | `dbo.spr_BestOdds_ValueBets`: unificación canónica de 2 lados (`OVER`/`UNDER`, `LINE_NEG`/`LINE_POS`, `AWAY`/`HOME`), eliminación de falsos positivos con `LadosEncontrados > 2`, De-Vig dual con `dbo.BestOddBooks` (ancla Stake) y habilitación de totales de partido completo en todos los deportes. |
 | 1.6 | 2026-11-10 | `OddsSync`: paginación sin solapamiento (`OffsetIncrement: 200`, `MaxOffset: 20000` y respeto a `NextOffset` / `Math.Max(OffsetIncrement, Limit)` en `SyncBestOddsUseCase`). |
 | 1.5 | 2026-11-10 | FrontBet: sync manual de arbitraje y ciclo de 60 s mientras la operación activa está encendida. En reposo sigue en 3 min. |

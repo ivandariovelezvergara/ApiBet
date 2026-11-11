@@ -22,6 +22,9 @@ export const config = {
     getPath: textEnv('VITE_ODDS_GET_PATH', '/api/odds/best'),
     intervalMs: numberEnv('VITE_ODDS_INTERVAL_MINUTES', 10) * 60 * 1000,
   },
+  bets: {
+    path: textEnv('VITE_BETS_PATH', '/api/bets'),
+  },
   catalogs: {
     sportsSyncPath: textEnv('VITE_SPORTS_SYNC_PATH', '/api/sports/sync'),
     sportsbooksSyncPath: textEnv('VITE_SPORTSBOOKS_SYNC_PATH', '/api/sportsbooks/sync'),

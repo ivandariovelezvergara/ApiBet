@@ -3,12 +3,16 @@ import {
   ARBITRAGE_ACTIVE_INTERVAL_MS,
   ARBITRAGE_SYNC_INTERVAL_MS,
   CATALOGS_SYNC_INTERVAL_MS,
+  createPlacedBet,
+  getBestOddsCatalog,
   getCatalogsSyncDelayMs,
+  getPlacedBets,
   loadCatalogTables,
   ODDS_SYNC_INTERVAL_MS,
   runArbitrageCycle,
   runOddsCycle,
   syncReferenceCatalogs,
+  updatePlacedBetStatus,
 } from './api'
 
 const idleStatus = {
@@ -36,12 +40,17 @@ export function useBackgroundJobs() {
     arbitrageRows: [],
     summaries: [],
     picks: [],
+    placedBets: [],
+    placedBetsSummary: null,
     catalogsError: '',
     arbitrageError: '',
     oddsError: '',
+    placedBetsError: '',
     catalogsLoading: true,
     arbitrageLoading: true,
     oddsLoading: true,
+    placedBetsLoading: true,
+    busyBetKey: '',
   })
 
   const cancelledRef = useRef(false)
@@ -53,6 +62,124 @@ export function useBackgroundJobs() {
     ? ARBITRAGE_ACTIVE_INTERVAL_MS
     : ARBITRAGE_SYNC_INTERVAL_MS
   const intervalRef = useRef(arbitrageIntervalMs)
+
+  const refreshPlacedBets = useCallback(async () => {
+    try {
+      const catalog = await getPlacedBets()
+      if (cancelledRef.current) {
+        return
+      }
+
+      setTables((current) => ({
+        ...current,
+        placedBets: catalog?.data ?? [],
+        placedBetsSummary: catalog?.summary ?? null,
+        placedBetsError: '',
+        placedBetsLoading: false,
+      }))
+    } catch (cause) {
+      if (cancelledRef.current) {
+        return
+      }
+
+      setTables((current) => ({
+        ...current,
+        placedBetsError: cause.message || 'No se pudo cargar la bitácora de apuestas.',
+        placedBetsLoading: false,
+      }))
+    }
+  }, [])
+
+  const registerValueBet = useCallback(async (pickRow) => {
+    const key = `${pickRow.partido}|${pickRow.mercado}|${pickRow.apostarA}|${pickRow.linea ?? ''}`
+    setTables((current) => ({ ...current, busyBetKey: key, placedBetsError: '' }))
+
+    try {
+      await createPlacedBet({
+        betKind: 'VALUE_BET',
+        deporte: pickRow.deporte,
+        liga: pickRow.liga,
+        partido: pickRow.partido,
+        mercado: pickRow.mercado,
+        seleccion: pickRow.apostarA,
+        linea: pickRow.linea ?? null,
+        casa: pickRow.casa,
+        cuotaTomada: pickRow.cuotaActual,
+        cuotaMinimaRentable: pickRow.cuotaMinimaRentable,
+        probConsensoTomadaPct: pickRow.probConsensoPct,
+        evEstimadoPct: pickRow.evPct,
+        stakeCop: pickRow.stakeCop,
+        gananciaEsperadaCop: pickRow.gananciaEsperadaCop,
+      })
+
+      const [betsCatalog, oddsCatalog] = await Promise.all([
+        getPlacedBets(),
+        getBestOddsCatalog(),
+      ])
+
+      if (cancelledRef.current) {
+        return
+      }
+
+      setTables((current) => ({
+        ...current,
+        placedBets: betsCatalog?.data ?? [],
+        placedBetsSummary: betsCatalog?.summary ?? null,
+        picks: oddsCatalog?.picks ?? current.picks,
+        summaries: oddsCatalog?.summaries ?? current.summaries,
+        placedBetsError: '',
+        placedBetsLoading: false,
+        busyBetKey: '',
+      }))
+    } catch (cause) {
+      if (cancelledRef.current) {
+        return
+      }
+
+      setTables((current) => ({
+        ...current,
+        placedBetsError: cause.message || 'No se pudo registrar la apuesta.',
+        busyBetKey: '',
+      }))
+    }
+  }, [])
+
+  const changeBetStatus = useCallback(async (id, estado) => {
+    const key = `status-${id}`
+    setTables((current) => ({ ...current, busyBetKey: key, placedBetsError: '' }))
+
+    try {
+      await updatePlacedBetStatus(id, estado)
+      const [betsCatalog, oddsCatalog] = await Promise.all([
+        getPlacedBets(),
+        getBestOddsCatalog(),
+      ])
+
+      if (cancelledRef.current) {
+        return
+      }
+
+      setTables((current) => ({
+        ...current,
+        placedBets: betsCatalog?.data ?? [],
+        placedBetsSummary: betsCatalog?.summary ?? null,
+        picks: oddsCatalog?.picks ?? current.picks,
+        summaries: oddsCatalog?.summaries ?? current.summaries,
+        placedBetsError: '',
+        busyBetKey: '',
+      }))
+    } catch (cause) {
+      if (cancelledRef.current) {
+        return
+      }
+
+      setTables((current) => ({
+        ...current,
+        placedBetsError: cause.message || 'No se pudo actualizar el estado de la apuesta.',
+        busyBetKey: '',
+      }))
+    }
+  }, [])
 
   const runArbitrage = useCallback(async () => {
     setArbitrage((current) => ({ ...current, running: true, error: '' }))
@@ -203,6 +330,7 @@ export function useBackgroundJobs() {
           result: { delta, best },
           error,
         })
+        await refreshPlacedBets()
       } catch (cause) {
         if (cancelled) {
           return
@@ -223,6 +351,7 @@ export function useBackgroundJobs() {
     }
 
     async function start() {
+      refreshPlacedBets()
       await runCatalogs()
       if (cancelled) {
         return
@@ -261,7 +390,7 @@ export function useBackgroundJobs() {
       window.clearTimeout(arbitrageTimerRef.current)
       window.clearTimeout(oddsTimer)
     }
-  }, [scheduleArbitrage])
+  }, [refreshPlacedBets, scheduleArbitrage])
 
   const skipIntervalReset = useRef(true)
   useEffect(() => {
@@ -290,5 +419,7 @@ export function useBackgroundJobs() {
     arbitrageIntervalMs,
     setActiveOperation,
     syncArbitrageNow,
+    registerValueBet,
+    changeBetStatus,
   }
 }

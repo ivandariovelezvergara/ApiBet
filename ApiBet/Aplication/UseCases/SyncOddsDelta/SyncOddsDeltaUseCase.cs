@@ -13,6 +13,8 @@ namespace Aplication.UseCases.SyncOddsDelta
     /// </summary>
     public sealed class SyncOddsDeltaUseCase : ISyncOddsDeltaUseCase
     {
+        private static readonly SemaphoreSlim SyncGate = new(1, 1);
+
         private readonly IOddsClient _oddsClient;
         private readonly IOddsRepository _oddsRepository;
         private readonly IOptionsSnapshot<OddsDeltaOptions> _options;
@@ -35,6 +37,19 @@ namespace Aplication.UseCases.SyncOddsDelta
 
         /// <inheritdoc />
         public async Task<OddsDeltaSyncResultDto> ExecuteAsync(CancellationToken cancellationToken)
+        {
+            await SyncGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await ExecuteCoreAsync(cancellationToken);
+            }
+            finally
+            {
+                SyncGate.Release();
+            }
+        }
+
+        private async Task<OddsDeltaSyncResultDto> ExecuteCoreAsync(CancellationToken cancellationToken)
         {
             var stopwatch = Stopwatch.StartNew();
             var options = _options.Value;

@@ -1,7 +1,9 @@
+using Aplication.UseCases.CreatePlacedBet;
 using Aplication.UseCases.GetArbitrage;
 using Aplication.UseCases.GetBestOdds;
 using Aplication.UseCases.GetLeagues;
 using Aplication.UseCases.GetMarkets;
+using Aplication.UseCases.GetPlacedBets;
 using Aplication.UseCases.GetSports;
 using Aplication.UseCases.GetSportsbooks;
 using Aplication.UseCases.SyncArbitrage;
@@ -12,6 +14,7 @@ using Aplication.UseCases.SyncOdds;
 using Aplication.UseCases.SyncOddsDelta;
 using Aplication.UseCases.SyncSports;
 using Aplication.UseCases.SyncSportsbooks;
+using Aplication.UseCases.UpdatePlacedBetStatus;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Aplication
@@ -42,6 +45,9 @@ namespace Aplication
             services.AddScoped<ISyncOddsDeltaUseCase, SyncOddsDeltaUseCase>();
             services.AddScoped<ISyncArbitrageUseCase, SyncArbitrageUseCase>();
             services.AddScoped<IGetArbitrageUseCase, GetArbitrageUseCase>();
+            services.AddScoped<ICreatePlacedBetUseCase, CreatePlacedBetUseCase>();
+            services.AddScoped<IUpdatePlacedBetStatusUseCase, UpdatePlacedBetStatusUseCase>();
+            services.AddScoped<IGetPlacedBetsUseCase, GetPlacedBetsUseCase>();
             return services;
         }
     }

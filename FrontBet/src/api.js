@@ -112,6 +112,30 @@ export async function loadCatalogTables() {
   return { sports, sportsbooks, markets, leagues }
 }
 
+export function getBestOddsCatalog() {
+  return getJson(config.odds.getPath)
+}
+
+export function getPlacedBets() {
+  return getJson(config.bets.path)
+}
+
+export function createPlacedBet(payload) {
+  return fetch(config.bets.path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(readJson)
+}
+
+export function updatePlacedBetStatus(id, estado) {
+  return fetch(`${config.bets.path}/${id}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ estado }),
+  }).then(readJson)
+}
+
 function postJson(path) {
   const existing = inFlightByPath.get(path)
   if (existing) {

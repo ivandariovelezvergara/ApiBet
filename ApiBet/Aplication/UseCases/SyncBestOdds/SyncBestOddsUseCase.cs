@@ -13,6 +13,8 @@ namespace Aplication.UseCases.SyncBestOdds
     /// </summary>
     public sealed class SyncBestOddsUseCase : ISyncBestOddsUseCase
     {
+        private static readonly SemaphoreSlim SyncGate = new(1, 1);
+
         private readonly IBestOddsClient _bestOddsClient;
         private readonly IBestOddsRepository _bestOddsRepository;
         private readonly IOptionsSnapshot<OddsSyncOptions> _options;
@@ -35,6 +37,19 @@ namespace Aplication.UseCases.SyncBestOdds
 
         /// <inheritdoc />
         public async Task<BestOddsSyncResultDto> ExecuteAsync(CancellationToken cancellationToken)
+        {
+            await SyncGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await ExecuteCoreAsync(cancellationToken);
+            }
+            finally
+            {
+                SyncGate.Release();
+            }
+        }
+
+        private async Task<BestOddsSyncResultDto> ExecuteCoreAsync(CancellationToken cancellationToken)
         {
             var stopwatch = Stopwatch.StartNew();
             var options = _options.Value;

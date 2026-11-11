@@ -43,6 +43,7 @@ namespace Infraestructure
             services.AddScoped<IBestOddsRepository, BestOddsRepository>();
             services.AddScoped<IOddsRepository, OddsRepository>();
             services.AddScoped<IArbitrageOpportunityRepository, ArbitrageOpportunityRepository>();
+            services.AddScoped<IPlacedBetRepository, PlacedBetRepository>();
             services.AddScoped<ISportCatalogClient, SharpApiSportCatalogClient>();
             services.AddScoped<ILeagueCatalogClient, SharpApiLeagueCatalogClient>();
             services.AddScoped<ISportsbookCatalogClient, SharpApiSportsbookCatalogClient>();
